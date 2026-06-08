@@ -9,7 +9,12 @@ load_dotenv(override=True)
 
 _api_key = os.getenv("ANTHROPIC_AUTH_TOKEN") or os.getenv("ANTHROPIC_API_KEY")
 
-WORKDIR = Path.cwd()
+# AGENT_HOME: MiniCode's own state directory (memory, skills, tasks, etc.)
+# Defaults to the directory where run.py lives (Path.cwd() at import time).
+AGENT_HOME = Path.cwd().resolve()
+
+# WORKDIR: the agent's workspace sandbox. Set via .env to operate on another directory.
+WORKDIR = Path(os.getenv("AGENT_WORKDIR", AGENT_HOME)).resolve()
 
 # Anthropic client — created once at module load.
 from anthropic import Anthropic
@@ -22,16 +27,14 @@ MODEL = os.environ["MODEL_ID"]
 PRIMARY_MODEL = MODEL
 FALLBACK_MODEL = os.getenv("FALLBACK_MODEL_ID")
 
-# Directory paths.
-SKILLS_DIR = WORKDIR / "skills"
-TRANSCRIPT_DIR = WORKDIR / ".transcripts"
-TOOL_RESULTS_DIR = WORKDIR / ".task_outputs" / "tool-results"
-TASKS_DIR = WORKDIR / ".tasks"
-WORKTREES_DIR = WORKDIR / ".worktrees"
-MAILBOX_DIR = WORKDIR / ".mailboxes"
-MEMORY_DIR = WORKDIR / ".memory"
+# Directory paths — all MiniCode data lives under AGENT_HOME.
+SKILLS_DIR = AGENT_HOME / "skills"
+TRANSCRIPT_DIR = AGENT_HOME / ".transcripts"
+TOOL_RESULTS_DIR = AGENT_HOME / ".task_outputs" / "tool-results"
+WORKTREES_DIR = WORKDIR / ".worktrees"   # worktrees belong to the workspace repo
+MEMORY_DIR = AGENT_HOME / ".memory"
 MEMORY_INDEX = MEMORY_DIR / "MEMORY.md"
-DURABLE_PATH = WORKDIR / ".scheduled_tasks.json"
+DB_PATH = AGENT_HOME / "agent.db"        # SQLite database for tasks/cron/messages
 
 # Subprocess environment (UTF-8 + Python on PATH for Windows).
 _PYTHON_DIR = str(Path(sys.executable).parent)
@@ -52,42 +55,51 @@ CONTEXT_LIMIT = 50000
 KEEP_RECENT_TOOL_RESULTS = 3
 PERSIST_THRESHOLD = 30000
 
-# CLI.
+# CLI / debug.
+DEBUG = os.getenv("DEBUG_AGENT") == "1"
 CONTINUATION_PROMPT = "Continue from the previous response. Do not repeat completed work."
 PROMPT = "\033[36m> \033[0m"
 CLI_ACTIVE = False
 
-# Permission deny / destructive lists (cross-platform).
-# DENY_LIST: auto-reject, no user override. Destructive to system.
-DENY_LIST = [
-    # Linux / Unix
-    "rm -rf /", "rm -rf / ", "mkfs", "dd if=", "dd if =",
-    "> /dev/sd", "> /dev/hd", "> /dev/nvme", "> /dev/xvd",
-    # Windows
-    "format ", "diskpart", "reg delete",
-    "del /f /s C:\\", "del /f /s D:\\",
-    "rd /s /q C:\\", "rd /s /q D:\\",
-    "\\\\.\\PhysicalDrive", "\\\\.\\C:",
-    "Remove-Item -Recurse -Force C:\\",
-    "Remove-Item -Recurse -Force D:\\",
-    "Remove-Item -Path C:\\",
-    # Cross-platform
-    "sudo", "shutdown", "reboot",
+# Permission model — tiered command safety (replaces simple deny lists).
+#
+# SAFE:       auto-allow, no confirmation (read-only / dev tools)
+# CONFIRM:    warn + interactive confirm (destructive but workspace-scoped)
+# BLOCKED:    always reject (system-level destruction)
+#
+# Unknown commands fall through to path-scanning: any absolute path
+# outside WORKDIR triggers confirmation.
+
+SAFE_COMMANDS = [
+    "echo", "cat", "type", "head", "tail", "more",
+    "ls", "dir", "tree", "find", "grep", "rg", "wc",
+    "pwd", "cd", "which", "where", "whoami", "hostname",
+    "git", "python", "python3", "pip", "node", "npm", "npx",
+    "cargo", "go", "rustc", "javac", "java",
+    "mkdir", "cp", "copy", "mv", "move", "ren", "rename",
 ]
 
-# DESTRUCTIVE: warn + interactive confirm. Danger to workspace or local state.
-DESTRUCTIVE = [
-    # Linux / Unix
-    "rm ", "> /etc/", "chmod 777", "chmod -R 777",
-    # Windows
-    "del ", "rd ", "rmdir ",
-    "icacls ", "takeown",
+CONFIRM_COMMANDS = [
+    "rm", "del", "rd", "rmdir", "Remove-Item",
+    "chmod", "icacls", "takeown", "cacls",
+    "chown", "kill", "taskkill",
+    "shutdown",
+]
+
+BLOCKED_PATTERNS = [
+    # raw disk / device access
+    "/dev/sd", "/dev/hd", "/dev/nvme", "/dev/xvd",
+    "\\\\.\\PhysicalDrive", "\\\\.\\C:",
+    # filesystem formatting
+    "mkfs", "format", "diskpart",
+    # registry / system config destruction
+    "reg delete", "reg add",
+    "dd if=", "dd if =",
+    # privilege escalation
+    "sudo", "runas", "Set-ExecutionPolicy",
+    # redirect to system paths
+    "> /etc/", "> /usr/", "> /boot/",
     "> C:\\Windows", "> C:\\WINDOWS",
-    "Remove-Item ",
-    "Set-ExecutionPolicy",
-    "runas ",
-    # Cross-platform
-    "shutdown /s", "shutdown /r",
 ]
 
 # Round tracker for todo reminders.

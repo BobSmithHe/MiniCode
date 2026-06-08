@@ -1,13 +1,11 @@
-"""Task system — durable file-backed task records with dependency graph."""
+"""Task system — SQLite-backed task records with dependency graph."""
 
-import json, time, random
-from pathlib import Path
+import json, time
 from dataclasses import dataclass, asdict
 
-from ...infra.config import TASKS_DIR
-
-# Ensure the tasks directory exists on first import.
-TASKS_DIR.mkdir(exist_ok=True)
+from ...infra.storage.db import (
+    task_create as _db_create, task_get, task_list, task_update, task_delete,
+)
 
 CURRENT_TODOS: list[dict] = []
 
@@ -22,81 +20,91 @@ class Task:
     blockedBy: list[str]
     worktree: str | None = None
 
-
-def _task_path(task_id: str) -> Path:
-    return TASKS_DIR / f"{task_id}.json"
+    @classmethod
+    def from_row(cls, row: dict) -> "Task":
+        return cls(
+            id=row["id"],
+            subject=row["subject"],
+            description=row.get("description", ""),
+            status=row.get("status", "pending"),
+            owner=row.get("owner"),
+            blockedBy=row.get("blocked_by", []),
+            worktree=row.get("worktree"),
+        )
 
 
 def create_task(subject: str, description: str = "",
                 blockedBy: list[str] | None = None) -> Task:
-    task = Task(
-        id=f"task_{int(time.time())}_{random.randint(0, 9999):04d}",
-        subject=subject, description=description,
-        status="pending", owner=None,
-        blockedBy=blockedBy or [],
-    )
-    save_task(task)
-    return task
+    row = _db_create(subject, description, blockedBy or [])
+    return Task.from_row(row)
 
 
 def save_task(task: Task):
-    _task_path(task.id).write_text(json.dumps(asdict(task), indent=2), encoding="utf-8")
+    task_update(task.id, subject=task.subject, description=task.description,
+                status=task.status, owner=task.owner,
+                blocked_by=task.blockedBy, worktree=task.worktree)
 
 
 def load_task(task_id: str) -> Task:
-    return Task(**json.loads(_task_path(task_id).read_text(encoding="utf-8")))
+    row = task_get(task_id)
+    if row is None:
+        raise FileNotFoundError(f"Task {task_id} not found")
+    return Task.from_row(row)
 
 
 def list_tasks() -> list[Task]:
-    return [Task(**json.loads(p.read_text(encoding="utf-8")))
-            for p in sorted(TASKS_DIR.glob("task_*.json"))]
+    return [Task.from_row(r) for r in task_list()]
 
 
 def get_task_json(task_id: str) -> str:
-    return json.dumps(asdict(load_task(task_id)), indent=2)
+    return json.dumps(task_get(task_id) or {}, indent=2)
 
 
 def can_start(task_id: str) -> bool:
-    task = load_task(task_id)
-    for dep_id in task.blockedBy:
-        if not _task_path(dep_id).exists():
-            return False
-        if load_task(dep_id).status != "completed":
+    task = task_get(task_id)
+    if not task:
+        return False
+    for dep_id in task.get("blocked_by", []):
+        dep = task_get(dep_id)
+        if dep is None or dep.get("status") != "completed":
             return False
     return True
 
 
 def claim_task(task_id: str, owner: str = "agent") -> str:
-    task = load_task(task_id)
-    if task.status != "pending":
-        return f"Task {task_id} is {task.status}, cannot claim"
-    if task.owner:
-        return f"Task {task_id} already owned by {task.owner}"
+    row = task_get(task_id)
+    if row is None:
+        return f"Task {task_id} not found"
+    if row["status"] != "pending":
+        return f"Task {task_id} is {row['status']}, cannot claim"
+    if row.get("owner"):
+        return f"Task {task_id} already owned by {row['owner']}"
     if not can_start(task_id):
-        deps = [d for d in task.blockedBy
-                if _task_path(d).exists() and load_task(d).status != "completed"]
-        missing = [d for d in task.blockedBy if not _task_path(d).exists()]
+        deps = [d for d in row.get("blocked_by", [])
+                if task_get(d) and task_get(d).get("status") != "completed"]
+        missing = [d for d in row.get("blocked_by", []) if not task_get(d)]
         parts = []
         if deps: parts.append(f"blocked by: {deps}")
         if missing: parts.append(f"missing deps: {missing}")
         return "Cannot start — " + ", ".join(parts)
-    task.owner = owner
-    task.status = "in_progress"
-    save_task(task)
-    print(f"  \033[36m[claim] {task.subject} -> in_progress\033[0m")
-    return f"Claimed {task.id} ({task.subject})"
+    task_update(task_id, owner=owner, status="in_progress")
+    print(f"  \033[36m[claim] {row['subject']} -> in_progress\033[0m")
+    return f"Claimed {task_id} ({row['subject']})"
 
 
 def complete_task(task_id: str) -> str:
-    task = load_task(task_id)
-    if task.status != "in_progress":
-        return f"Task {task_id} is {task.status}, cannot complete"
-    task.status = "completed"
-    save_task(task)
-    unblocked = [t.subject for t in list_tasks()
-                 if t.status == "pending" and t.blockedBy and can_start(t.id)]
-    print(f"  \033[32m[complete] {task.subject} OK\033[0m")
-    msg = f"Completed {task.id} ({task.subject})"
+    row = task_get(task_id)
+    if row is None:
+        return f"Task {task_id} not found"
+    if row["status"] != "in_progress":
+        return f"Task {task_id} is {row['status']}, cannot complete"
+    task_update(task_id, status="completed")
+    tasks = task_list()
+    unblocked = [t["subject"] for t in tasks
+                 if t["status"] == "pending" and t.get("blocked_by")
+                 and task_get(t["id"]) and can_start(t["id"])]
+    print(f"  \033[32m[complete] {row['subject']} OK\033[0m")
+    msg = f"Completed {task_id} ({row['subject']})"
     if unblocked:
         msg += f"\nUnblocked: {', '.join(unblocked)}"
     return msg

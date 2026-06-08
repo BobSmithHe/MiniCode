@@ -6,7 +6,7 @@ from pathlib import Path
 from ...infra.config import WORKDIR, WORKTREES_DIR, BASH_ENV
 
 # Ensure worktree directory exists on first import.
-WORKTREES_DIR.mkdir(exist_ok=True)
+WORKTREES_DIR.mkdir(parents=True, exist_ok=True)
 
 VALID_WT_NAME = re.compile(r'^[A-Za-z0-9._-]{1,64}$')
 

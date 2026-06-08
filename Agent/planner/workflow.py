@@ -15,8 +15,8 @@ from ..memory.compactor import prepare_context, compact_history, reactive_compac
 from ..tools.registry import assemble_tool_pool, call_tool_handler
 from ..executor.dispatcher import build_user_content, inject_background_notifications
 from ..executor.executor import should_run_background, start_background_task
-from ..protocols.events import trigger_hooks
-from ..infra.logging import terminal_print
+from ..protocols import events as _events
+from ..infra.logging import terminal_print, tool_start as _log_tool_start, tool_end as _log_tool_end, turn_start as _log_turn_start, turn_end as _log_turn_end
 
 # Re-export assemble_tool_pool for convenience
 from ..tools.registry import assemble_tool_pool  # noqa: F811
@@ -56,6 +56,8 @@ def agent_loop(messages: list, context: dict):
     tools, handlers = assemble_tool_pool()
     state = RecoveryState()
     max_tokens = _cfg.DEFAULT_MAX_TOKENS
+    _events._stop_turn_start = len(messages)
+    _log_turn_start()
 
     # s09: load relevant memories once at turn entry
     memories_content = load_memories(messages)
@@ -123,17 +125,38 @@ def agent_loop(messages: list, context: dict):
 
         # No tool_use → stop. Extract memories from this turn.
         if not has_tool_use(response.content):
-            trigger_hooks("Stop", messages)
+            _events.trigger_hooks("Stop", messages)
+            _log_turn_end(sum(1 for b in response.content if b.type == "tool_use"))
             after_turn_memories(pre_compress)
             return
 
         # Execute each tool_use block.
+        _TOOL_LABELS = {
+            "read_file": "Read", "write_file": "Write", "edit_file": "Edit",
+            "bash": "Bash", "glob": "Glob", "task": "Task",
+            "todo_write": "Todo", "load_skill": "Skill",
+            "create_task": "CreateTask", "list_tasks": "ListTasks",
+            "get_task": "GetTask", "claim_task": "ClaimTask",
+            "complete_task": "CompleteTask",
+            "list_memories": "ListMemories", "read_memory": "ReadMemory",
+            "write_memory": "WriteMemory",
+            "spawn_teammate": "Spawn", "send_message": "Send",
+            "schedule_cron": "Cron", "connect_mcp": "MCP",
+        }
         results = []
         compacted_now = False
         for block in response.content:
             if block.type != "tool_use":
                 continue
-            print(f"\033[36m> {block.name}\033[0m")
+            label = _TOOL_LABELS.get(block.name, block.name)
+            if block.name == "bash":
+                cmd = block.input.get("command", "")[:60]
+                print(f"  \033[36m{label}(\033[0m{cmd}\033[36m)\033[0m")
+            elif block.name in ("read_file", "write_file", "edit_file"):
+                path = block.input.get("path", "")
+                print(f"  \033[36m{label}(\033[0m{path}\033[36m)\033[0m")
+            else:
+                print(f"  \033[36m{label}\033[0m")
 
             if block.name == "compact":
                 messages[:] = compact_history(messages)
@@ -142,7 +165,7 @@ def agent_loop(messages: list, context: dict):
                 compacted_now = True
                 break
 
-            blocked = trigger_hooks("PreToolUse", block)
+            blocked = _events.trigger_hooks("PreToolUse", block)
             if blocked:
                 results.append({"type": "tool_result",
                                 "tool_use_id": block.id,
@@ -159,8 +182,12 @@ def agent_loop(messages: list, context: dict):
                 continue
 
             handler = handlers.get(block.name)
+            _log_tool_start(block.name, block.input)
+            t0 = __import__("time").time()
             output = call_tool_handler(handler, block.input, block.name)
-            trigger_hooks("PostToolUse", block, output)
+            t1 = __import__("time").time()
+            _log_tool_end(block.name, output, (t1 - t0) * 1000)
+            _events.trigger_hooks("PostToolUse", block, output)
             terminal_print(str(output)[:300])
 
             if block.name == "todo_write":

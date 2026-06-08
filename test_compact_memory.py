@@ -25,8 +25,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 # Create required directories so the Agent module loads without errors
-for d in [".memory", ".tasks", ".transcripts", ".task_outputs/tool-results",
-          ".worktrees", ".mailboxes"]:
+for d in [".memory", ".transcripts", ".task_outputs/tool-results"]:
     (_PROJECT_ROOT / d).mkdir(parents=True, exist_ok=True)
 
 # Write a minimal .env if not present — Agent.infra.config needs it

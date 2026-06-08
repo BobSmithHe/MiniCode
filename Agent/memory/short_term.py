@@ -72,6 +72,11 @@ def load_skill(name: str) -> str:
 
 PROMPT_SECTIONS = {
     "identity": "You are a coding agent. Act, don't explain.",
+    "platform": (
+        f"OS: {__import__('os').name} | "
+        f"Shell: {__import__('os').environ.get('COMSPEC', 'cmd.exe')} | "
+        f"Python: {__import__('sys').version.split()[0]}"
+    ),
     "tools": "Available tools: bash, read_file, write_file, edit_file, glob, "
              "todo_write, task, load_skill, compact, "
              "create_task, list_tasks, get_task, claim_task, complete_task, "
@@ -79,8 +84,19 @@ PROMPT_SECTIONS = {
              "spawn_teammate, send_message, check_inbox, "
              "request_shutdown, request_plan, review_plan, "
              "create_worktree, remove_worktree, keep_worktree, "
-             "connect_mcp. MCP tools are prefixed mcp__{server}__{tool}.",
+             "connect_mcp, list_memories, read_memory, write_memory. "
+             "MCP tools are prefixed mcp__{server}__{tool}.",
     "workspace": f"Working directory: {WORKDIR}",
+    "rules": (
+        "RULES:\n"
+        "1. Use only Windows-compatible shell commands "
+        "(dir not ls, del not rm, type not cat, findstr not grep). "
+        "Prefer Python for cross-platform file operations.\n"
+        "2. Only use todo_write for multi-step tasks (3+ distinct steps). "
+        "Do NOT create todos for single commands or simple questions.\n"
+        "3. Only write memories for: user preferences, project structure, "
+        "long-term goals. Do NOT memorize one-off command results."
+    ),
     "memory": ("Relevant memories are injected below when available. "
                "When the user says 'remember' or expresses a clear preference, "
                "use write_memory to persist it. "
@@ -90,7 +106,9 @@ PROMPT_SECTIONS = {
 
 def assemble_system_prompt(context: dict) -> str:
     sections = [PROMPT_SECTIONS["identity"],
+                PROMPT_SECTIONS["platform"],
                 PROMPT_SECTIONS["tools"],
+                PROMPT_SECTIONS["rules"],
                 PROMPT_SECTIONS["workspace"]]
     sections.append(f"Current time: {datetime.now().isoformat(timespec='seconds')}")
     sections.append("Skills catalog:\n" + list_skills() +

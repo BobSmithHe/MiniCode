@@ -4,7 +4,7 @@ import json, time, threading, re
 from pathlib import Path
 
 from ..infra.config import (
-    client, MODEL, WORKDIR, WORKTREES_DIR, TASKS_DIR, active_teammates,
+    client, MODEL, WORKDIR, WORKTREES_DIR, active_teammates,
 )
 from ..infra.llm import has_tool_use, extract_text
 from ..tools.task import (
@@ -20,12 +20,10 @@ IDLE_TIMEOUT = 60
 
 
 def scan_unclaimed_tasks() -> list[dict]:
+    from ..infra.storage.db import task_list as _db_task_list
     unclaimed = []
-    for f in sorted(TASKS_DIR.glob("task_*.json")):
-        task = json.loads(f.read_text(encoding="utf-8"))
-        if (task.get("status") == "pending"
-                and not task.get("owner")
-                and can_start(task["id"])):
+    for task in _db_task_list(status="pending"):
+        if not task.get("owner") and can_start(task["id"]):
             unclaimed.append(task)
     return unclaimed
 

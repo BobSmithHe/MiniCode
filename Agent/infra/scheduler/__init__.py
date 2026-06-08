@@ -4,17 +4,17 @@ Cron jobs are stored separately from conversation history. When a job fires,
 it becomes a scheduled prompt that is injected back into the same agent loop.
 """
 
-import json, time, random, threading
+import time, random, threading
 from datetime import datetime
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 
-from ..config import DURABLE_PATH
+from ...infra.storage.db import cron_list, cron_add, cron_remove
 
 
 @dataclass
 class CronJob:
     id: str
-    cron: str
+    cron_expr: str
     prompt: str
     recurring: bool
     durable: bool
@@ -111,21 +111,21 @@ def validate_cron(cron_expr: str) -> str | None:
     return None
 
 
-def save_durable_jobs():
-    durable = [asdict(job) for job in scheduled_jobs.values() if job.durable]
-    DURABLE_PATH.write_text(json.dumps(durable, indent=2), encoding="utf-8")
-
-
 def load_durable_jobs():
-    if not DURABLE_PATH.exists():
-        return
-    try:
-        for item in json.loads(DURABLE_PATH.read_text(encoding="utf-8")):
-            job = CronJob(**item)
-            if not validate_cron(job.cron):
+    """Restore durable cron jobs from SQLite on startup."""
+    for row in cron_list():
+        if not validate_cron(row["cron_expr"]):
+            try:
+                job = CronJob(
+                    id=row["id"],
+                    cron_expr=row["cron_expr"],
+                    prompt=row["prompt"],
+                    recurring=bool(row.get("recurring", 1)),
+                    durable=bool(row.get("durable", 1)),
+                )
                 scheduled_jobs[job.id] = job
-    except Exception:
-        pass
+            except Exception:
+                pass
 
 
 def schedule_job(cron: str, prompt: str,
@@ -135,12 +135,12 @@ def schedule_job(cron: str, prompt: str,
         return err
     job = CronJob(
         id=f"cron_{random.randint(0, 999999):06d}",
-        cron=cron, prompt=prompt,
+        cron_expr=cron, prompt=prompt,
         recurring=recurring, durable=durable)
     with cron_lock:
         scheduled_jobs[job.id] = job
     if durable:
-        save_durable_jobs()
+        cron_add(job.id, job.cron_expr, job.prompt, job.recurring, job.durable)
     return job
 
 
@@ -150,7 +150,7 @@ def cancel_job(job_id: str) -> str:
     if not job:
         return f"Job {job_id} not found"
     if job.durable:
-        save_durable_jobs()
+        cron_add(job.id, job.cron_expr, job.prompt, job.recurring, job.durable)
     return f"Cancelled {job_id}"
 
 
@@ -162,13 +162,13 @@ def cron_scheduler_loop():
         with cron_lock:
             for job in list(scheduled_jobs.values()):
                 try:
-                    if cron_matches(job.cron, now) and _last_fired.get(job.id) != marker:
+                    if cron_matches(job.cron_expr, now) and _last_fired.get(job.id) != marker:
                         cron_queue.append(job)
                         _last_fired[job.id] = marker
                         if not job.recurring:
                             scheduled_jobs.pop(job.id, None)
                             if job.durable:
-                                save_durable_jobs()
+                                cron_remove(job.id)
                 except Exception as e:
                     print(f"  \033[31m[cron error] {job.id}: {e}\033[0m")
 
@@ -197,7 +197,7 @@ def run_list_crons() -> str:
     if not jobs:
         return "No cron jobs."
     return "\n".join(
-        f"  {job.id}: '{job.cron}' -> {job.prompt[:40]} "
+        f"  {job.id}: '{job.cron_expr}' -> {job.prompt[:40]} "
         f"[{'recurring' if job.recurring else 'one-shot'}, "
         f"{'durable' if job.durable else 'session'}]"
         for job in jobs)

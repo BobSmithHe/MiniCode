@@ -164,5 +164,10 @@ __marimo__/
 .worktrees/
 .mailboxes/
 .scheduled_tasks.json
+logs/
 *.jsonl
 code.py
+.idea/
+agent.db
+agent.db-wal
+agent.db-shm

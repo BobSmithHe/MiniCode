@@ -11,11 +11,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 # Create support dirs
-for d in [".memory", ".tasks", ".transcripts", ".task_outputs/tool-results",
-          ".worktrees", ".mailboxes", ".scheduled_tasks.json"]:
+for d in [".memory", ".transcripts", ".task_outputs/tool-results"]:
     p = _PROJECT_ROOT / d
-    if p.suffix: p.parent.mkdir(parents=True, exist_ok=True)
-    else: p.mkdir(parents=True, exist_ok=True)
+    p.mkdir(parents=True, exist_ok=True)
 
 PASS = FAIL = 0
 
@@ -28,8 +26,7 @@ def section(title):
     print(f"\n{'='*60}\n{title}\n{'='*60}")
 
 def cleanup(pattern):
-    for d in [".memory", ".tasks", ".transcripts",
-              ".task_outputs/tool-results", ".worktrees", ".mailboxes"]:
+    for d in [".memory", ".transcripts", ".task_outputs/tool-results"]:
         for f in (_PROJECT_ROOT / d).glob(pattern):
             if f.name == "MEMORY.md": continue
             try: f.unlink()
@@ -77,31 +74,48 @@ check("call_tool_handler handles TypeError for wrong args",
       "Error:" in call_tool_handler(handlers["bash"], {}, "bash"))
 
 # ══════════════════════════════════════════════════════════════════
-section("s03 — Permission: DENY_LIST / DESTRUCTIVE / permission_hook")
+section("s03 — Permission: tiered model (safe / confirm / blocked)")
 
-from Agent.infra.config import DENY_LIST, DESTRUCTIVE
-check("DENY_LIST has 'rm -rf /'", any("rm" in d for d in DENY_LIST))
-check("DENY_LIST has 'sudo'", any("sudo" in d for d in DENY_LIST))
-check("DENY_LIST has 'shutdown'", any("shutdown" in d for d in DENY_LIST))
-check("DESTRUCTIVE list not empty", len(DESTRUCTIVE) > 0)
+from Agent.infra.config import SAFE_COMMANDS, CONFIRM_COMMANDS, BLOCKED_PATTERNS
+check("s03: SAFE_COMMANDS has common tools", "echo" in SAFE_COMMANDS and "git" in SAFE_COMMANDS)
+check("s03: CONFIRM_COMMANDS has destructive tools", "rm" in CONFIRM_COMMANDS and "chmod" in CONFIRM_COMMANDS)
+check("s03: BLOCKED_PATTERNS has system-level threats",
+      any("mkfs" in p or "diskpart" in p or "format" in p for p in BLOCKED_PATTERNS))
 
 from Agent.protocols.events import permission_hook
 from types import SimpleNamespace
 
-block = SimpleNamespace(name="bash", input={"command": "rm -rf /"})
+# BLOCKED — system-level destruction always rejected
+block = SimpleNamespace(name="bash", input={"command": "mkfs /dev/sda1"})
 result = permission_hook(block)
-check("permission_hook blocks rm -rf /", result is not None and "Permission denied" in result)
+check("s03: blocks system-level destruction (mkfs)",
+      result is not None and "blocked" in result.lower())
 
+block2 = SimpleNamespace(name="bash", input={"command": "diskpart"})
+result2 = permission_hook(block2)
+check("s03: blocks system-level destruction (diskpart)",
+      result2 is not None and "blocked" in result2.lower())
+
+# SAFE — auto-allow
 block_ok = SimpleNamespace(name="bash", input={"command": "echo hello"})
-check("permission_hook allows safe bash", permission_hook(block_ok) is None)
+check("s03: allows safe commands", permission_hook(block_ok) is None)
 
-# Path escape test
+block_ok2 = SimpleNamespace(name="bash", input={"command": "git status"})
+check("s03: allows git", permission_hook(block_ok2) is None)
+
+# Path escape for write_file
 block_escape = SimpleNamespace(name="write_file", input={"path": "/etc/passwd"})
-check("permission_hook blocks path escape",
+check("s03: blocks write_file path escape",
       permission_hook(block_escape) is not None)
 
 block_safe = SimpleNamespace(name="write_file", input={"path": "test.txt"})
-check("permission_hook allows safe path", permission_hook(block_safe) is None)
+check("s03: allows write_file within workspace", permission_hook(block_safe) is None)
+
+# Path scanning — detect absolute path outside workspace (triggers confirm)
+block_path = SimpleNamespace(name="bash", input={"command": "type C:\\Windows\\System32\\drivers\\etc\\hosts"})
+r = permission_hook(block_path)
+check("s03: path scan catches C:\\Windows absolute path",
+      r is not None and "workspace" in r.lower())
 
 # ══════════════════════════════════════════════════════════════════
 section("s04 — Hooks: PreToolUse / PostToolUse / Stop / UserPromptSubmit")
@@ -377,15 +391,11 @@ from Agent.tools.task import (
     Task, create_task, save_task, load_task, list_tasks,
     can_start, claim_task, complete_task, get_task_json,
 )
-from Agent.infra.config import TASKS_DIR
-
-# Clean
-for f in TASKS_DIR.glob("task_*.json"): f.unlink()
 
 t1 = create_task("Design database", "Create ERD")
 check("s12: create_task returns Task", isinstance(t1, Task))
 check("s12: task status is pending", t1.status == "pending")
-check("s12: task saved to disk", (TASKS_DIR / f"{t1.id}.json").exists())
+check("s12: task persisted in SQLite", load_task(t1.id).subject == t1.subject)
 
 # blockedBy
 t2 = create_task("Implement API", "Based on design", blockedBy=[t1.id])
@@ -420,8 +430,6 @@ check("s12: get_task_json returns valid JSON", "Design database" in json_str)
 # Complete t2
 claim_task(t2.id)
 complete_task(t2.id)
-
-for f in TASKS_DIR.glob("task_*.json"): f.unlink()
 
 # ══════════════════════════════════════════════════════════════════
 section("s13 — Background Tasks: thread execution / notification queue")
@@ -461,8 +469,7 @@ section("s14 — Cron Scheduler: cron_matches / durable / lifecycle")
 
 from Agent.infra.scheduler import (
     CronJob, cron_matches, validate_cron, schedule_job, cancel_job,
-    scheduled_jobs, cron_lock, load_durable_jobs, save_durable_jobs,
-    cron_scheduler_loop,
+    scheduled_jobs, cron_lock, load_durable_jobs, cron_scheduler_loop,
 )
 from datetime import datetime
 
@@ -496,30 +503,23 @@ with cron_lock: scheduled_jobs.clear()
 # ══════════════════════════════════════════════════════════════════
 section("s15 — Agent Teams: MessageBus / spawn_teammate / inbox")
 
-from Agent.protocols.messaging import BUS, MAILBOX_DIR
+from Agent.protocols.messaging import BUS
 from Agent.infra.config import active_teammates
 
 # Clean
-for f in MAILBOX_DIR.glob("*.jsonl"): f.unlink()
 active_teammates.clear()
 
 # MessageBus send
 BUS.send("lead", "worker1", "Process task 42", "message", {"priority": "high"})
-inbox_file = MAILBOX_DIR / "worker1.jsonl"
-check("s15: inbox file created on send", inbox_file.exists())
 
 # MessageBus read_inbox
 msgs = BUS.read_inbox("worker1")
 check("s15: read_inbox returns sent message", len(msgs) == 1, f"{len(msgs)}")
 check("s15: message content matches", msgs[0]["content"] == "Process task 42")
 check("s15: message metadata preserved", msgs[0]["metadata"]["priority"] == "high")
-check("s15: inbox file consumed after read", not inbox_file.exists())
 
 # read empty
 check("s15: empty inbox returns []", BUS.read_inbox("nobody") == [])
-
-# Clean
-for f in MAILBOX_DIR.glob("*.jsonl"): f.unlink()
 
 # ══════════════════════════════════════════════════════════════════
 section("s16 — Team Protocols: shutdown handshake / plan approval / request_id")
@@ -532,7 +532,6 @@ from Agent.protocols.approval import (
 
 # Clean
 pending_requests.clear()
-for f in MAILBOX_DIR.glob("*.jsonl"): f.unlink()
 
 # request_shutdown
 r = request_shutdown("worker1")
@@ -560,7 +559,6 @@ check("s16: review_plan rejects unknown request", "not found" in r)
 
 # Cleanup
 pending_requests.clear()
-for f in MAILBOX_DIR.glob("*.jsonl"): f.unlink()
 
 # ══════════════════════════════════════════════════════════════════
 section("s17 — Autonomous Agents: idle_poll / auto-claim / idle timeout")
@@ -568,21 +566,16 @@ section("s17 — Autonomous Agents: idle_poll / auto-claim / idle timeout")
 from Agent.protocols.team import (
     scan_unclaimed_tasks, idle_poll, IDLE_POLL_INTERVAL, IDLE_TIMEOUT,
 )
-from Agent.infra.config import TASKS_DIR as _TD
 
-# scan_unclaimed_tasks with no tasks
+# scan_unclaimed_tasks with no pending tasks (existing tasks from s12 are completed)
 check("s17: scan_unclaimed_tasks empty", scan_unclaimed_tasks() == [])
 
 # Create a pending task for auto-claim
-for f in _TD.glob("task_*.json"): f.unlink()
 from Agent.tools.task import create_task as _ct
 t = _ct("Auto-claim test task", "Test autonomous agent")
 check("s17: pending task exists for scan", t.status == "pending")
 unclaimed = scan_unclaimed_tasks()
 check("s17: scan finds unclaimed task", len(unclaimed) == 1, f"{len(unclaimed)}")
-
-# Clean
-for f in _TD.glob("task_*.json"): f.unlink()
 
 # ══════════════════════════════════════════════════════════════════
 section("s18 — Worktree Isolation: create / remove / keep / validation")
@@ -697,9 +690,7 @@ cleanup("*.json")
 cleanup("*.jsonl")
 cleanup("*.md")
 cleanup("*.txt")
-for f in _PROJECT_ROOT.glob(".scheduled_tasks.json"): f.unlink()
-for p in [_PROJECT_ROOT / d for d in [".transcripts", ".task_outputs/tool-results",
-         ".tasks", ".worktrees", ".mailboxes", ".memory"]]:
+for p in [_PROJECT_ROOT / d for d in [".transcripts", ".task_outputs/tool-results", ".memory"]]:
     if p.exists():
         for f in p.iterdir():
             try: f.unlink()

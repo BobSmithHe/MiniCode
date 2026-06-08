@@ -190,14 +190,18 @@ def extract_memories(messages: list):
     )
 
     prompt = (
-        "Extract user preferences, constraints, or project facts from this dialogue.\n"
+        "Extract ONLY meaningful new memories from this dialogue.\n"
         "Return a JSON array. Each item: {name, type, description, body}.\n"
         "- name: short kebab-case identifier (e.g. 'user-preference-tabs')\n"
         "- type: one of 'user' (user preference), 'feedback' (guidance), "
         "'project' (project fact), 'reference' (external pointer)\n"
         "- description: one-line summary for index lookup\n"
-        "- body: full detail in markdown\n"
-        "If nothing new or already covered by existing memories, return [].\n\n"
+        "- body: full detail in markdown\n\n"
+        "DO NOT extract: one-off command results, temporary file operations, "
+        "tool outputs, or trivial interactions.\n"
+        "ONLY extract: user preferences, project structure/layout, "
+        "long-term goals, coding conventions, workspace configuration.\n"
+        "If nothing qualifies, return [].\n\n"
         f"Existing memories:\n{existing_desc}\n\n"
         f"Dialogue:\n{dialogue[:4000]}"
     )
